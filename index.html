@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>request.trace — how a web request actually works</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0B0E14;
+  --panel:#141A23;
+  --panel-2:#1B222D;
+  --border:#262E3B;
+  --text:#D9DEE7;
+  --muted:#6B7585;
+  --amber:#FFB454;
+  --cyan:#5CCFE6;
+  --green:#95E6CB;
+  --red:#F28779;
+  --node:#8CC84B;
+  --font-display:"Space Grotesk",sans-serif;
+  --font-body:"Inter",sans-serif;
+  --font-mono:"JetBrains Mono",monospace;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:var(--font-body);
+  min-height:100vh;
+}
+::selection{background:var(--amber);color:#0B0E14;}
+
+/* ---------- tab bar ---------- */
+.tabbar{
+  display:flex;
+  align-items:stretch;
+  background:#080A0F;
+  border-bottom:1px solid var(--border);
+  padding:0 16px;
+  position:sticky;
+  top:0;
+  z-index:50;
+  overflow-x:auto;
+}
+.tab{
+  font-family:var(--font-mono);
+  font-size:13px;
+  color:var(--muted);
+  background:transparent;
+  border:none;
+  border-right:1px solid var(--border);
+  padding:14px 22px;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  white-space:nowrap;
+  transition:color .15s ease, background .15s ease;
+}
+.tab .dot{width:7px;height:7px;border-radius:50%;background:var(--muted);transition:background .15s ease;}
+.tab:hover{color:var(--text);background:rgba(255,255,255,.02);}
+.tab.active{color:var(--text);background:var(--bg);border-bottom:2px solid var(--amber);margin-bottom:-1px;}
+.tab.active .dot{background:var(--amber);}
+.tab.active:nth-child(2) .dot{background:var(--cyan);}
+.tab.active:nth-child(3) .dot{background:var(--green);}
+.tab.active:nth-child(4) .dot{background:var(--node);}
+
+main{max-width:1180px;margin:0 auto;padding:0 24px 80px;}
+.page{display:none;animation:fadein .3s ease;}
+.page.active{display:block;}
+@keyframes fadein{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:translateY(0);}}
+
+/* ---------- shared bits ---------- */
+.eyebrow{
+  font-family:var(--font-mono);
+  font-size:12px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--amber);
+  margin:0 0 10px;
+}
+h1{font-family:var(--font-display);font-size:42px;line-height:1.15;margin:0 0 14px;font-weight:700;}
+h2{font-family:var(--font-display);font-size:24px;font-weight:600;margin:0 0 10px;}
+p{line-height:1.65;color:var(--text);margin:0 0 14px;}
+.muted{color:var(--muted);}
+a{color:var(--cyan);text-decoration:none;}
+code,.mono{font-family:var(--font-mono);}
+
+/* ---------- HOME ---------- */
+.hero{padding:72px 0 40px;border-bottom:1px solid var(--border);}
+.hero p.lead{font-size:17px;color:var(--muted);max-width:560px;}
+.cta-row{display:flex;gap:12px;margin-top:28px;flex-wrap:wrap;}
+.btn{
+  font-family:var(--font-mono);
+  font-size:13px;
+  padding:13px 20px;
+  border-radius:8px;
+  border:1px solid var(--border);
+  background:var(--panel);
+  color:var(--text);
+  cursor:pointer;
+  transition:transform .12s ease, border-color .12s ease, background .12s ease;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+}
+.btn:hover{transform:translateY(-1px);border-color:var(--amber);}
+.btn.primary{background:var(--amber);color:#0B0E14;border-color:var(--amber);font-weight:600;}
+.btn.primary:hover{background:#ffc578;}
+.btn:disabled{opacity:.35;cursor:not-allowed;transform:none;}
+.btn:disabled:hover{border-color:var(--border);}
+
+.ambient-wrap{padding:50px 0 70px;overflow-x:auto;}
+.ambient{width:1100px;height:140px;position:relative;margin:0 auto;}
+.amb-box{position:absolute;top:35px;height:70px;width:160px;border:1px solid var(--border);border-radius:10px;background:var(--panel);display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:12px;color:var(--muted);}
+.amb-line{position:absolute;top:69px;height:2px;background:repeating-linear-gradient(90deg,var(--border) 0 6px,transparent 6px 12px);}
+.amb-dot{position:absolute;top:65px;width:9px;height:9px;border-radius:50%;background:var(--amber);box-shadow:0 0 12px var(--amber);animation:travel 4.5s linear infinite;}
+@keyframes travel{
+  0%{left:120px;background:var(--amber);box-shadow:0 0 12px var(--amber);}
+  30%{left:430px;background:var(--amber);box-shadow:0 0 12px var(--amber);}
+  50%{left:430px;background:var(--cyan);box-shadow:0 0 12px var(--cyan);}
+  75%{left:760px;background:var(--cyan);box-shadow:0 0 12px var(--cyan);}
+  90%{left:980px;background:var(--green);box-shadow:0 0 12px var(--green);}
+  100%{left:120px;background:var(--amber);box-shadow:0 0 12px var(--amber);}
+}
+.feature-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:40px 0 60px;}
+.feature{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:22px;}
+.feature .n{font-family:var(--font-mono);color:var(--muted);font-size:12px;margin-bottom:10px;}
+.feature h3{font-family:var(--font-display);font-size:16px;margin:0 0 8px;}
+.feature p{font-size:14px;color:var(--muted);margin:0;}
+
+/* ---------- TUTORIAL ---------- */
+.tut-header{padding:36px 0 20px;display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:14px;border-bottom:1px solid var(--border);}
+.tut-status{font-family:var(--font-mono);font-size:13px;color:var(--muted);}
+.tut-status b{color:var(--amber);}
+.tut-phase{font-family:var(--font-display);font-size:26px;font-weight:600;margin-top:4px;}
+
+.diagram-wrap{overflow-x:auto;padding:34px 0 10px;}
+.diagram{position:relative;width:1080px;height:300px;margin:0 auto;}
+.dline{position:absolute;top:159px;left:140px;width:850px;height:2px;background:repeating-linear-gradient(90deg,var(--border) 0 6px,transparent 6px 12px);}
+.box{
+  position:absolute;
+  border:1px solid var(--border);
+  border-radius:12px;
+  background:var(--panel);
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  text-align:center;
+  transition:border-color .25s ease, box-shadow .25s ease, background .25s ease;
+}
+.box .label{font-family:var(--font-mono);font-size:11px;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;}
+.box .name{font-family:var(--font-display);font-size:16px;font-weight:600;margin-top:6px;}
+.box.frontend{left:30px;top:80px;width:220px;height:160px;}
+.box.route{left:330px;top:110px;width:180px;height:100px;}
+.box.function{left:600px;top:80px;width:220px;height:160px;}
+.box.database{left:910px;top:110px;width:160px;height:100px;}
+.box.lit{border-color:var(--amber);box-shadow:0 0 0 1px var(--amber), 0 0 24px rgba(255,180,84,.25);}
+.box.lit.cy{border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan), 0 0 24px rgba(92,207,230,.25);}
+.box.lit.gr{border-color:var(--green);box-shadow:0 0 0 1px var(--green), 0 0 24px rgba(149,230,203,.25);}
+.box .mini{font-family:var(--font-mono);font-size:10px;color:var(--muted);margin-top:8px;line-height:1.5;}
+
+.packet{
+  position:absolute;
+  width:18px;height:18px;border-radius:50%;
+  background:var(--amber);
+  box-shadow:0 0 16px var(--amber);
+  transform:translate(-50%,-50%);
+  transition:left .85s cubic-bezier(.4,0,.2,1), top .85s cubic-bezier(.4,0,.2,1), background .3s ease, box-shadow .3s ease;
+  z-index:5;
+}
+
+.panels{display:grid;grid-template-columns:1.5fr 1fr;gap:18px;margin-top:18px;}
+@media (max-width:860px){.panels{grid-template-columns:1fr;}}
+.explain{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:24px;min-height:230px;}
+.explain .step-tag{font-family:var(--font-mono);font-size:11px;color:var(--amber);letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px;}
+.explain h3{font-family:var(--font-display);font-size:19px;margin:0 0 10px;}
+.explain p{font-size:14.5px;}
+.codeblock{
+  font-family:var(--font-mono);
+  font-size:13px;
+  background:var(--panel-2);
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:14px 16px;
+  margin-top:12px;
+  white-space:pre-wrap;
+  line-height:1.6;
+  overflow-x:auto;
+}
+.codeblock .kw{color:var(--cyan);}
+.codeblock .str{color:var(--green);}
+.codeblock .com{color:var(--muted);}
+.codeblock .fn{color:var(--amber);}
+.codetag{font-family:var(--font-mono);font-size:10px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-top:14px;display:block;}
+
+.mock-table{width:100%;border-collapse:collapse;margin-top:10px;font-family:var(--font-mono);font-size:12.5px;}
+.mock-table th,.mock-table td{border-bottom:1px solid var(--border);padding:7px 10px;text-align:left;}
+.mock-table th{color:var(--muted);font-weight:500;text-transform:uppercase;font-size:10.5px;letter-spacing:.05em;}
+
+.render-preview{margin-top:12px;border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.render-preview .rp-head{background:var(--panel-2);padding:8px 12px;font-family:var(--font-mono);font-size:10.5px;color:var(--muted);border-bottom:1px solid var(--border);}
+.rp-row{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border);}
+.rp-row:last-child{border-bottom:none;}
+.rp-avatar{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--amber),var(--cyan));flex-shrink:0;}
+.rp-name{font-size:13px;font-weight:600;}
+.rp-role{font-size:11px;color:var(--muted);font-family:var(--font-mono);}
+
+.trace{background:#0E1218;border:1px solid var(--border);border-radius:12px;padding:16px 16px 8px;height:230px;display:flex;flex-direction:column;}
+.trace .trace-head{font-family:var(--font-mono);font-size:11px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;flex-shrink:0;display:flex;gap:6px;align-items:center;}
+.trace .trace-head .ledge{width:6px;height:6px;border-radius:50%;background:var(--green);}
+.trace-body{font-family:var(--font-mono);font-size:12px;line-height:1.9;overflow-y:auto;flex:1;}
+.trace-line{color:var(--muted);opacity:0;animation:lineIn .3s ease forwards;}
+@keyframes lineIn{to{opacity:1;}}
+.trace-line .who{color:var(--cyan);}
+.trace-line .arrow{color:var(--amber);}
+.trace-line.placeholder{color:var(--border);font-style:italic;}
+
+.controls{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;margin-top:20px;padding:16px 20px;background:var(--panel);border:1px solid var(--border);border-radius:12px;}
+.ctrl-btns{display:flex;gap:8px;align-items:center;}
+.ctrl-btn{
+  width:38px;height:38px;border-radius:8px;border:1px solid var(--border);background:var(--panel-2);
+  color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;
+  transition:border-color .15s ease, transform .1s ease;
+}
+.ctrl-btn:hover{border-color:var(--amber);}
+.ctrl-btn:active{transform:scale(.93);}
+.ctrl-btn:disabled{opacity:.3;cursor:not-allowed;}
+.ctrl-btn.play{width:52px;background:var(--amber);color:#0B0E14;border-color:var(--amber);font-size:16px;}
+.ctrl-btn.play:hover{background:#ffc578;}
+.dots{display:flex;gap:7px;}
+.pdot{
+  width:9px;height:9px;border-radius:50%;background:var(--border);border:none;cursor:pointer;padding:0;
+  transition:background .15s ease, transform .15s ease;
+}
+.pdot:hover{transform:scale(1.3);}
+.pdot.done{background:var(--muted);}
+.pdot.now{background:var(--amber);transform:scale(1.4);}
+.reset-link{font-family:var(--font-mono);font-size:12px;color:var(--muted);background:none;border:none;cursor:pointer;text-decoration:underline;}
+.reset-link:hover{color:var(--text);}
+
+/* ---------- DOCS ---------- */
+.docs-wrap{display:grid;grid-template-columns:200px 1fr;gap:40px;padding:40px 0 80px;}
+@media (max-width:760px){.docs-wrap{grid-template-columns:1fr;}}
+.docs-nav{position:sticky;top:60px;align-self:start;display:flex;flex-direction:column;gap:4px;}
+.docs-nav a{font-family:var(--font-mono);font-size:13px;color:var(--muted);padding:8px 10px;border-radius:6px;}
+.docs-nav a:hover{color:var(--text);background:var(--panel);}
+.docs-section{padding-bottom:54px;border-bottom:1px solid var(--border);margin-bottom:46px;}
+.docs-section:last-child{border-bottom:none;}
+.docs-section h2{display:flex;align-items:center;gap:10px;}
+.docs-section h2 .tagdot{width:8px;height:8px;border-radius:50%;}
+.docs-section p{max-width:680px;font-size:15px;}
+.docs-section .codeblock{max-width:680px;}
+.term{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:10px;max-width:680px;}
+.term .t-name{font-family:var(--font-mono);color:var(--amber);font-size:13px;margin-bottom:4px;}
+.term p{margin:0;font-size:13.5px;color:var(--muted);}
+
+/* ---------- EXPRESS LESSON ---------- */
+.lesson-intro{padding:36px 0 8px;max-width:680px;}
+.lesson-intro .note{margin-top:14px;display:flex;gap:10px;align-items:flex-start;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;font-size:13.5px;color:var(--muted);}
+.lesson-intro .note b{color:var(--node);}
+.lesson-list{padding:18px 0 30px;max-width:760px;}
+.lesson-step{border:1px solid var(--border);border-radius:10px;background:var(--panel);margin-bottom:12px;overflow:hidden;}
+.lesson-step summary{cursor:pointer;padding:15px 18px;font-family:var(--font-mono);font-size:13.5px;display:flex;align-items:center;gap:12px;list-style:none;user-select:none;}
+.lesson-step summary::-webkit-details-marker{display:none;}
+.lesson-step summary::before{content:'+';color:var(--node);font-size:16px;width:16px;flex-shrink:0;}
+.lesson-step[open] summary::before{content:'–';}
+.lesson-step .num{color:var(--node);font-weight:600;flex-shrink:0;}
+.lesson-step .stitle{color:var(--text);font-family:var(--font-body);font-size:14.5px;font-weight:600;}
+.lesson-step[open] summary{border-bottom:1px solid var(--border);}
+.lesson-body{padding:6px 18px 20px 46px;}
+.lesson-body p{font-size:14px;}
+.lesson-body .codeblock{margin-top:10px;}
+.challenge{border:1px dashed var(--cyan);border-radius:10px;padding:20px 22px;background:rgba(92,207,230,.05);max-width:760px;margin-top:8px;}
+.challenge .ctag{font-family:var(--font-mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--cyan);margin-bottom:10px;}
+.challenge p{font-size:14px;}
+.challenge details{margin-top:10px;}
+.challenge summary{cursor:pointer;font-family:var(--font-mono);font-size:12px;color:var(--muted);}
+.challenge .codeblock{margin-top:10px;}
+</style>
+</head>
+<body>
+
+<div class="tabbar">
+  <button class="tab active" data-page="home"><span class="dot"></span>home.md</button>
+  <button class="tab" data-page="tutorial"><span class="dot"></span>tutorial.live</button>
+  <button class="tab" data-page="docs"><span class="dot"></span>docs/</button>
+  <button class="tab" data-page="express"><span class="dot"></span>express.learn</button>
+</div>
+
+<main>
+
+  <!-- ================= HOME ================= -->
+  <section class="page active" id="page-home">
+    <div class="hero">
+      <p class="eyebrow">// a hands-on walkthrough</p>
+      <h1>How a web request<br>actually works.</h1>
+      <p class="lead">Click a button, get data back — but what really happens in between? This walks through one real request, one step at a time: frontend → route → function → database → back again.</p>
+      <div class="cta-row">
+        <button class="btn primary" onclick="goPage('tutorial')">▶ start the tutorial</button>
+        <button class="btn" onclick="goPage('docs')">read the docs</button>
+      </div>
+    </div>
+
+    <div class="ambient-wrap">
+      <div class="ambient">
+        <div class="amb-line" style="left:120px;width:860px;"></div>
+        <div class="amb-box" style="left:60px;">frontend</div>
+        <div class="amb-box" style="left:355px;">route</div>
+        <div class="amb-box" style="left:650px;">function</div>
+        <div class="amb-box" style="left:945px;">database</div>
+        <div class="amb-dot"></div>
+      </div>
+    </div>
+
+    <div class="feature-grid">
+      <div class="feature">
+        <div class="n">01</div>
+        <h3>Step through, don't just watch</h3>
+        <p>Play it like an animation, or pause and click through one stage at a time — whatever pace works for explaining it.</p>
+      </div>
+      <div class="feature">
+        <div class="n">02</div>
+        <h3>Real code at every stage</h3>
+        <p>Each step shows the actual line of code involved — the route definition, the ORM call, the raw SQL, the JSON response.</p>
+      </div>
+      <div class="feature">
+        <div class="n">03</div>
+        <h3>The concepts, written out</h3>
+        <p>Once the flow makes sense, the docs page explains backend, REST APIs, and databases in plain language — no code required.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TUTORIAL ================= -->
+  <section class="page" id="page-tutorial">
+    <div class="tut-header">
+      <div>
+        <div class="tut-status" id="tutStatus">READY · 0 of 9</div>
+        <div class="tut-phase" id="tutPhase">GET /users</div>
+      </div>
+      <button class="reset-link" onclick="resetTutorial()">↺ reset</button>
+    </div>
+
+    <div class="diagram-wrap">
+      <div class="diagram" id="diagram">
+        <div class="dline"></div>
+        <div class="box frontend" id="box-frontend">
+          <div class="label">client</div>
+          <div class="name">Frontend</div>
+          <div class="mini">fetch('/users')</div>
+        </div>
+        <div class="box route" id="box-route">
+          <div class="label">rest api</div>
+          <div class="name">Route</div>
+        </div>
+        <div class="box function" id="box-function">
+          <div class="label">handler</div>
+          <div class="name">Function</div>
+          <div class="mini">getUsers()</div>
+        </div>
+        <div class="box database" id="box-database">
+          <div class="label">storage</div>
+          <div class="name">Database</div>
+        </div>
+        <div class="packet" id="packet"></div>
+      </div>
+    </div>
+
+    <div class="panels">
+      <div class="explain" id="explainPanel"></div>
+      <div class="trace">
+        <div class="trace-head"><span class="ledge"></span>console — request.log</div>
+        <div class="trace-body" id="traceBody"></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl-btns">
+        <button class="ctrl-btn" id="btnPrev" onclick="prevStep()" title="Previous step">⏮</button>
+        <button class="ctrl-btn play" id="btnPlay" onclick="togglePlay()" title="Play / pause">▶</button>
+        <button class="ctrl-btn" id="btnNext" onclick="nextStep()" title="Next step">⏭</button>
+      </div>
+      <div class="dots" id="dots"></div>
+      <div class="tut-status" id="tutHint" style="text-align:right;">click a dot to jump to any step</div>
+    </div>
+  </section>
+
+  <!-- ================= DOCS ================= -->
+  <section class="page" id="page-docs">
+    <div class="docs-wrap">
+      <nav class="docs-nav">
+        <a href="#doc-backend">Backend, generally</a>
+        <a href="#doc-architecture">Architecture patterns</a>
+        <a href="#doc-rest">REST APIs</a>
+        <a href="#doc-db">Databases & SQL</a>
+        <a href="#doc-security">Security basics</a>
+        <a href="#doc-beyond">Beyond the basics</a>
+        <a href="#doc-glossary">Glossary</a>
+      </nav>
+      <div>
+        <div class="docs-section" id="doc-backend">
+          <h2><span class="tagdot" style="background:var(--amber);"></span>Backend, generally</h2>
+          <p>The <b>backend</b> is the part of an application that runs on a server, not in the user's browser. It's invisible to the user — there's no UI to click on — but it does the real work: storing data, applying rules, and deciding what each request is allowed to do.</p>
+          <p>A useful way to think about it: the <b>frontend</b> is the dining room — what the customer sees and interacts with. The backend is the kitchen — where the food is actually prepared, ingredients are stored, and orders get matched to recipes. The customer never walks into the kitchen, but nothing reaches the table without it.</p>
+          <p>A backend is usually built from a few recurring pieces:</p>
+          <div class="term"><div class="t-name">server</div><p>A long-running program that listens for incoming requests (usually over HTTP) and responds to them.</p></div>
+          <div class="term"><div class="t-name">router</div><p>Decides which piece of code should handle a given request, based on the URL and the HTTP method.</p></div>
+          <div class="term"><div class="t-name">controller / handler function</div><p>The actual logic for one specific action — e.g. "fetch all users," or "create a new order."</p></div>
+          <div class="term"><div class="t-name">database</div><p>Where data is stored permanently, even after the server restarts.</p></div>
+
+          <p style="margin-top:22px;">A couple of distinctions that confuse people early on are worth untangling:</p>
+          <p><b>Server vs. server-side code.</b> "Server" can mean a physical (or virtual) machine sitting in a data center, <i>or</i> the program running on it that handles requests. In day-to-day conversation, people usually mean the program — e.g. "restart the server" means "restart the process," not "unplug the computer."</p>
+          <p><b>Stateless requests.</b> Most backends are designed so each request is handled independently — the server doesn't "remember" you between requests just because you talked to it a moment ago. If it needs to recognize you, that information (like a login token) has to be sent again with every request. This is part of why REST APIs scale well: any server in a pool can answer any request, since none of them are holding onto a private memory of you.</p>
+          <p><b>Synchronous vs. asynchronous work.</b> Some operations finish almost instantly (reading one row from a database). Others take real time (resizing a video, calling an external payment provider). Backends are written to avoid blocking — while one slow request is waiting on something, the server should still be free to handle other requests, not sit frozen.</p>
+        </div>
+
+        <div class="docs-section" id="doc-architecture">
+          <h2><span class="tagdot" style="background:var(--amber);"></span>Architecture patterns</h2>
+          <p>Once a backend grows past a handful of routes, it helps to organize the code by responsibility rather than dumping everything in one file. The most common pattern, and the one this tutorial's flow is loosely based on, is <b>MVC</b>:</p>
+          <div class="term"><div class="t-name">Model</div><p>Represents one kind of data and how to read/write it — e.g. a <span class="mono">User</span> model wraps the users table.</p></div>
+          <div class="term"><div class="t-name">View</div><p>What gets shown to the user. In an API-only backend there's often no "view" in the traditional sense — the JSON response plays that role, and the frontend renders the actual view.</p></div>
+          <div class="term"><div class="t-name">Controller</div><p>The handler function — receives the request, talks to the model, decides what response to send. This is the "Function" box in the tutorial.</p></div>
+          <p>Another piece worth knowing about is <b>middleware</b> — small functions that run <i>before</i> a request reaches its controller, often chained together. Common uses: checking whether a user is logged in, logging every incoming request, or rejecting a request if its body is malformed.</p>
+          <div class="codeblock">router.<span class="fn">get</span>(<span class="str">'/users'</span>, requireLogin, UserController.getUsers);
+<span class="com">// requireLogin runs first — if it fails, getUsers never runs</span></div>
+          <p>Lastly, most real projects keep configuration — database passwords, API keys, which environment they're running in — out of the code itself, using <b>environment variables</b>. This is why you'll often see a call like <span class="mono">process.env.DATABASE_URL</span> instead of a password typed directly into a file. It means the same code can run against a test database locally and a production database on a real server, with nothing in the code changing.</p>
+        </div>
+
+        <div class="docs-section" id="doc-rest">
+          <h2><span class="tagdot" style="background:var(--cyan);"></span>REST APIs</h2>
+          <p>An <b>API</b> (Application Programming Interface) is just an agreed-upon way for two programs to talk to each other. A <b>REST API</b> is a common style of API built on top of HTTP, the same protocol your browser already uses to load web pages.</p>
+          <p>REST organizes everything around two ideas: a <b>resource</b> (a "thing," like a user, an order, or a comment) and an <b>HTTP method</b> (what you want to do to that thing).</p>
+          <div class="codeblock">GET    /users        <span class="com">// list all users</span>
+GET    /users/12     <span class="com">// get one user, id 12</span>
+POST   /users        <span class="com">// create a new user</span>
+PUT    /users/12     <span class="com">// replace user 12</span>
+PATCH  /users/12     <span class="com">// update part of user 12</span>
+DELETE /users/12     <span class="com">// remove user 12</span></div>
+          <p>Every response carries a <b>status code</b> — a short number that tells you broadly what happened before you even look at the body:</p>
+          <table class="mock-table">
+            <tr><th>code</th><th>meaning</th><th>typical cause</th></tr>
+            <tr><td style="color:var(--green)">200</td><td>OK</td><td>request succeeded</td></tr>
+            <tr><td style="color:var(--green)">201</td><td>Created</td><td>a POST successfully made something new</td></tr>
+            <tr><td style="color:var(--amber)">400</td><td>Bad Request</td><td>the request was malformed, e.g. missing a field</td></tr>
+            <tr><td style="color:var(--amber)">401</td><td>Unauthorized</td><td>you're not logged in</td></tr>
+            <tr><td style="color:var(--amber)">403</td><td>Forbidden</td><td>you're logged in, but not allowed to do this</td></tr>
+            <tr><td style="color:var(--amber)">404</td><td>Not Found</td><td>that resource doesn't exist</td></tr>
+            <tr><td style="color:var(--red)">500</td><td>Server Error</td><td>something broke on the backend, not your fault</td></tr>
+          </table>
+          <p style="margin-top:16px;">The response body is almost always <b>JSON</b> — a lightweight, text-based format for structured data that both JavaScript and most other languages can read easily. Requests also carry <b>headers</b>: small bits of metadata sent alongside the body, like <span class="mono">Content-Type: application/json</span> (this is JSON) or <span class="mono">Authorization: Bearer ...</span> (here's proof of who I am).</p>
+          <p>A few more ideas that come up constantly once you're working with real APIs:</p>
+          <div class="term"><div class="t-name">idempotency</div><p>Calling the same request twice should leave things in the same state as calling it once. <span class="mono">DELETE /users/12</span> twice should not cause an error the second time — the user is just already gone. GET and PUT are expected to be idempotent; POST usually isn't, since calling it twice often creates two records.</p></div>
+          <div class="term"><div class="t-name">pagination</div><p>"Give me every order" could mean millions of rows. Real APIs usually return a page at a time, e.g. <span class="mono">GET /orders?page=2&limit=50</span>, so neither the database nor the network gets overwhelmed.</p></div>
+          <div class="term"><div class="t-name">versioning</div><p>APIs change over time, but old clients (an app that hasn't been updated) may still depend on the old shape. Prefixing routes with a version, like <span class="mono">/v1/users</span>, lets you change <span class="mono">/v2/users</span> without breaking everyone still on v1.</p></div>
+          <div class="term"><div class="t-name">authentication vs. authorization</div><p>Authentication answers "who are you?" (logging in). Authorization answers "are you allowed to do this?" (an admin can delete a user; a regular user can't). A request can be authenticated and still get a 403 if it's not authorized.</p></div>
+        </div>
+
+        <div class="docs-section" id="doc-db">
+          <h2><span class="tagdot" style="background:var(--green);"></span>Databases & SQL</h2>
+          <p>A <b>database</b> stores data in an organized, durable way, and lets you ask questions of it — "give me every user," "find the order placed yesterday," "count how many comments this post has." A common kind, a <b>relational database</b>, stores data in <b>tables</b>: rows and columns, much like a spreadsheet, where each row is one record and each column is one field.</p>
+          <p><b>SQL</b> (Structured Query Language) is how you talk to a relational database.</p>
+          <div class="codeblock">SELECT id, name, email FROM users WHERE role = 'admin';</div>
+          <p>In most real backends, you don't write SQL by hand for every action. Instead you use an <b>ORM</b> (Object-Relational Mapper) — a library that lets you write plain code like <code>User.findAll()</code>, which it then translates into SQL for you. It's a convenience layer, not a replacement for understanding what's happening underneath — which is exactly what the tutorial visualizes.</p>
+
+          <p style="margin-top:22px;">A few ideas that explain a lot once they click:</p>
+          <div class="term"><div class="t-name">relationships & foreign keys</div><p>Tables connect to each other. An <span class="mono">orders</span> table might have a <span class="mono">user_id</span> column pointing back to a row in <span class="mono">users</span> — that's a foreign key. It's how "one user has many orders" gets represented without copying the user's data into every order row.</p></div>
+          <div class="term"><div class="t-name">JOIN</div><p>A query that pulls matching rows from two related tables at once — e.g. "every order, along with the name of the user who placed it" — by following that foreign key.</p></div>
+          <div class="term"><div class="t-name">index</div><p>A separate, ordered structure the database keeps on a column so it doesn't have to scan every row to find matches — similar to how a book's index lets you skip straight to a page instead of reading cover to cover. Indexes make reads faster but make writes slightly slower, since the index has to be updated too.</p></div>
+          <div class="term"><div class="t-name">transaction</div><p>A group of operations that must all succeed, or all be undone together. If a transfer needs to subtract money from one account and add it to another, a transaction guarantees you never end up with the first half done and the second half failed.</p></div>
+          <div class="term"><div class="t-name">migration</div><p>A version-controlled, repeatable script that changes the database's structure — e.g. "add a <span class="mono">role</span> column to <span class="mono">users</span>" — so every environment (your laptop, a teammate's laptop, production) ends up with the exact same schema.</p></div>
+          <p style="margin-top:18px;">Not every database is relational. <b>NoSQL</b> databases (like MongoDB or DynamoDB) skip the strict rows-and-columns structure in favor of more flexible documents, often trading some consistency guarantees for speed and flexibility at large scale. Most teams default to a relational database unless they have a specific reason not to — the structure tends to catch mistakes early rather than later.</p>
+        </div>
+
+        <div class="docs-section" id="doc-security">
+          <h2><span class="tagdot" style="background:var(--red);"></span>Security basics</h2>
+          <p>None of this needs to be intimidating, but a few habits separate "it works" from "it's safe to actually ship":</p>
+          <div class="term"><div class="t-name">never store passwords as plain text</div><p>Passwords are run through a one-way <b>hashing</b> function (like bcrypt) before being saved. The database never holds the actual password — only something derived from it that can verify a login attempt but can't be reversed back into the original.</p></div>
+          <div class="term"><div class="t-name">SQL injection</div><p>If user input gets pasted directly into a SQL string, a malicious input like <span class="mono">' OR 1=1</span> can change what the query actually does. ORMs and parameterized queries prevent this by treating input strictly as data, never as part of the SQL itself.</p></div>
+          <div class="term"><div class="t-name">HTTPS</div><p>Encrypts traffic between the client and server, so anyone intercepting it in transit (e.g. on shared wifi) sees scrambled data instead of readable requests, passwords, or tokens.</p></div>
+          <div class="term"><div class="t-name">CORS</div><p>Cross-Origin Resource Sharing. A browser security rule that blocks a webpage on one domain from freely calling an API on another domain unless that API explicitly allows it. It's a common source of confusing errors the first time you connect a frontend to a backend running on a different port or domain.</p></div>
+          <div class="term"><div class="t-name">least privilege</div><p>Give each piece of the system only the access it actually needs. A function that only ever reads users shouldn't be using database credentials that can also delete tables.</p></div>
+        </div>
+
+        <div class="docs-section" id="doc-beyond">
+          <h2><span class="tagdot" style="background:var(--text);"></span>Beyond the basics</h2>
+          <p>For when the fundamentals feel comfortable and the next layer of "why do real systems look like this" becomes interesting:</p>
+          <div class="term"><div class="t-name">caching</div><p>Storing the result of an expensive operation so the next request can skip redoing the work. If <span class="mono">GET /users</span> is called a thousand times a minute and the data rarely changes, caching the response for a few seconds can dramatically cut database load.</p></div>
+          <div class="term"><div class="t-name">load balancing</div><p>When one server can't handle all the traffic, you run several copies and put a load balancer in front to spread requests across them. This only works cleanly because requests are stateless — any server can answer any request.</p></div>
+          <div class="term"><div class="t-name">horizontal vs. vertical scaling</div><p>Vertical scaling means making one server bigger (more CPU/RAM). Horizontal scaling means running more servers side by side. Most large systems lean horizontal, since there's a ceiling on how big one machine can get.</p></div>
+          <div class="term"><div class="t-name">monolith vs. microservices</div><p>A monolith is one codebase handling everything — simpler to build and reason about early on. Microservices split the system into smaller, independently deployed services (a "users service," an "orders service," etc.) — more flexible at large scale, but with real added complexity in coordinating them.</p></div>
+          <div class="term"><div class="t-name">message queues</div><p>For work that doesn't need to finish before responding (sending a confirmation email after signup), the request can drop a message in a queue and respond immediately, while a separate worker process handles the email afterward.</p></div>
+          <div class="term"><div class="t-name">rate limiting</div><p>Capping how many requests a single user or client can make in a given window, to protect the backend from being overwhelmed — by mistake or on purpose.</p></div>
+        </div>
+
+        <div class="docs-section" id="doc-glossary">
+          <h2><span class="tagdot" style="background:var(--text);"></span>Glossary</h2>
+          <div class="term"><div class="t-name">HTTP</div><p>The protocol web browsers and servers use to send requests and responses to each other.</p></div>
+          <div class="term"><div class="t-name">JSON</div><p>JavaScript Object Notation — a plain-text format for structured data, e.g. <span class="mono">{"id": 1, "name": "Asha"}</span>.</p></div>
+          <div class="term"><div class="t-name">endpoint</div><p>One specific URL + method combination an API exposes, e.g. <span class="mono">GET /users</span>.</p></div>
+          <div class="term"><div class="t-name">ORM</div><p>Object-Relational Mapper — translates code calls into SQL behind the scenes.</p></div>
+          <div class="term"><div class="t-name">request / response</div><p>A request is what the client sends; a response is what the server sends back.</p></div>
+          <div class="term"><div class="t-name">schema</div><p>The defined structure of a database — which tables exist, which columns they have, and what type of data each column holds.</p></div>
+          <div class="term"><div class="t-name">payload</div><p>The actual data inside a request or response — as opposed to the headers and metadata wrapped around it.</p></div>
+          <div class="term"><div class="t-name">CRUD</div><p>Create, Read, Update, Delete — the four basic operations almost every resource in an API supports, in some form.</p></div>
+          <div class="term"><div class="t-name">latency</div><p>The delay between sending a request and getting a response. Distance, server load, and database speed all add to it.</p></div>
+          <div class="term"><div class="t-name">token</div><p>A piece of data (often a long random-looking string) issued after login, sent with later requests to prove who you are without re-sending your password every time.</p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= EXPRESS / NODE LESSON ================= -->
+  <section class="page" id="page-express">
+    <div class="lesson-intro">
+      <p class="eyebrow">// build the real thing</p>
+      <h1 style="font-size:32px;">Build the <span style="color:var(--node);">GET /users</span> endpoint, for real</h1>
+      <p>Everything in the animated tutorial — the route, the function, the SQL, the JSON — was a simulation. This is the same flow, written as actual Node.js + Express code you can run on a real machine. Work through it top to bottom; each step builds on the last.</p>
+      <div class="note">📦 <span><b>Before you start:</b> install Node.js from nodejs.org (it comes with npm). Then open a terminal in an empty folder for this project.</span></div>
+    </div>
+
+    <div class="lesson-list">
+
+      <details class="lesson-step" open>
+        <summary><span class="num">01</span><span class="stitle">Set up the project</span></summary>
+        <div class="lesson-body">
+          <p>Every Node project starts with a <span class="mono">package.json</span> — a file that tracks the project's name and its dependencies. Then we install Express, the library that does the routing and request/response handling for us.</p>
+          <span class="codetag">terminal</span>
+          <div class="codeblock"><span class="com"># inside your empty project folder</span>
+npm init -y
+npm install express</div>
+          <p>That's it — <span class="mono">node_modules</span> and a <span class="mono">package.json</span> should now exist in the folder.</p>
+        </div>
+      </details>
+
+      <details class="lesson-step">
+        <summary><span class="num">02</span><span class="stitle">Create the server</span></summary>
+        <div class="lesson-body">
+          <p>This is the "server" box from the diagram — a program that starts up and listens for requests. Create a file called <span class="mono">server.js</span>:</p>
+          <span class="codetag">server.js</span>
+          <div class="codeblock"><span class="kw">const</span> express = require(<span class="str">'express'</span>);
+<span class="kw">const</span> app = express();
+
+app.<span class="fn">listen</span>(3000, () => {
+  console.log(<span class="str">'Server running on http://localhost:3000'</span>);
+});</div>
+          <p>Run it with <span class="mono">node server.js</span>. You won't see much yet — there are no routes — but the server is alive and listening.</p>
+        </div>
+      </details>
+
+      <details class="lesson-step">
+        <summary><span class="num">03</span><span class="stitle">Add the route</span></summary>
+        <div class="lesson-body">
+          <p>This is the "Route" box. We tell Express: when a <span class="mono">GET</span> request comes in for <span class="mono">/users</span>, run this function.</p>
+          <span class="codetag">server.js — add above app.listen()</span>
+          <div class="codeblock"><span class="kw">const</span> mockUsers = [
+  { id: 1, name: <span class="str">'Asha Patel'</span>, role: <span class="str">'admin'</span> },
+  { id: 2, name: <span class="str">'Leo Martins'</span>, role: <span class="str">'editor'</span> }
+];
+
+app.<span class="fn">get</span>(<span class="str">'/users'</span>, (req, res) => {
+  res.<span class="fn">json</span>(mockUsers);
+});</div>
+          <p>Restart the server, then open <span class="mono">http://localhost:3000/users</span> in a browser. You should see the JSON array straight back — that's the entire request lifecycle from the diagram, just without a real database yet.</p>
+        </div>
+      </details>
+
+      <details class="lesson-step">
+        <summary><span class="num">04</span><span class="stitle">Pull the route's logic into its own function</span></summary>
+        <div class="lesson-body">
+          <p>Right now the route and the function are squashed together. In a real project they're separated — this is the "Function" box. Create <span class="mono">controllers/userController.js</span>:</p>
+          <span class="codetag">controllers/userController.js</span>
+          <div class="codeblock"><span class="kw">const</span> mockUsers = [
+  { id: 1, name: <span class="str">'Asha Patel'</span>, role: <span class="str">'admin'</span> },
+  { id: 2, name: <span class="str">'Leo Martins'</span>, role: <span class="str">'editor'</span> }
+];
+
+exports.<span class="fn">getUsers</span> = (req, res) => {
+  res.<span class="fn">json</span>(mockUsers);
+};</div>
+          <span class="codetag">server.js — replace the inline route</span>
+          <div class="codeblock"><span class="kw">const</span> userController = require(<span class="str">'./controllers/userController'</span>);
+app.<span class="fn">get</span>(<span class="str">'/users'</span>, userController.getUsers);</div>
+          <p>Same result in the browser, but now the route file only does routing, and the controller only does logic — exactly the Route → Function split you watched in the animation.</p>
+        </div>
+      </details>
+
+      <details class="lesson-step">
+        <summary><span class="num">05</span><span class="stitle">Add a middleware (a tiny logger)</span></summary>
+        <div class="lesson-body">
+          <p>Middleware runs <i>before</i> a request reaches its function. Here's the simplest possible one — it just logs every request, then passes control along with <span class="mono">next()</span>.</p>
+          <span class="codetag">server.js — above your routes</span>
+          <div class="codeblock">app.<span class="fn">use</span>((req, res, next) => {
+  console.log(`${req.method} ${req.url}`);
+  next(); <span class="com">// without this, the request would hang forever</span>
+});</div>
+          <p>Refresh <span class="mono">/users</span> and check your terminal — you'll see <span class="mono">GET /users</span> logged every time, before the controller ever runs.</p>
+        </div>
+      </details>
+
+      <details class="lesson-step">
+        <summary><span class="num">06</span><span class="stitle">Swap the mock array for a real database (optional next step)</span></summary>
+        <div class="lesson-body">
+          <p>This is the part the animated tutorial simulated with SQL. When you're ready, an ORM like <b>Sequelize</b> or <b>Prisma</b> replaces the mock array with a real query — the controller code barely changes:</p>
+          <span class="codetag">controllers/userController.js — with a real ORM</span>
+          <div class="codeblock"><span class="kw">const</span> { User } = require(<span class="str">'../models'</span>);
+
+exports.<span class="fn">getUsers</span> = <span class="kw">async</span> (req, res) => {
+  <span class="kw">const</span> users = <span class="kw">await</span> User.<span class="fn">findAll</span>();
+  res.<span class="fn">json</span>(users);
+};</div>
+          <p>Notice it's the exact same line you saw highlighted in the diagram's database step — that's not a coincidence, it's the real call.</p>
+        </div>
+      </details>
+
+    </div>
+
+    <div class="challenge">
+      <div class="ctag">🧪 try it yourself</div>
+      <p>Add a second route, <span class="mono">GET /users/:id</span>, that returns just one user matching that id from <span class="mono">mockUsers</span> — and a 404 if no user matches. (<span class="mono">:id</span> in the path becomes <span class="mono">req.params.id</span>.)</p>
+      <details>
+        <summary>show one possible answer</summary>
+        <div class="codeblock">app.<span class="fn">get</span>(<span class="str">'/users/:id'</span>, (req, res) => {
+  <span class="kw">const</span> user = mockUsers.<span class="fn">find</span>(u => u.id === <span class="fn">Number</span>(req.params.id));
+  <span class="kw">if</span> (!user) <span class="kw">return</span> res.<span class="fn">status</span>(404).<span class="fn">json</span>({ error: <span class="str">'User not found'</span> });
+  res.<span class="fn">json</span>(user);
+});</div>
+      </details>
+    </div>
+  </section>
+
+</main>
+
+<script>
+/* ---------------- page switching ---------------- */
+function goPage(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.page===name));
+  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active', p.id==='page-'+name));
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>goPage(t.dataset.page)));
+
+/* ---------------- step data ---------------- */
+// box centers (px, within 1080x300 diagram)
+const centers = {
+  frontend:{x:140,y:160},
+  route:{x:420,y:160},
+  function:{x:710,y:160},
+  database:{x:990,y:160}
+};
+
+const steps = [
+  { // 0 — idle
+    phase:'GET /users', status:'READY',
+    title:'Press play (or step forward) to send the request',
+    body:'This simulates the full round trip of a REST API call. Each step shows what\'s happening, where, and the real code involved. Use ▶ to auto-play, or ⏭ to move one step at a time.',
+    highlight:[], packetAt:'frontend', packetColor:'amber',
+    code:null, log:null
+  },
+  { phase:'Frontend sends the request', status:'STEP 1 OF 9',
+    title:'1 · The frontend sends an HTTP request',
+    body:'When code on the page calls fetch(\'/users\'), the browser opens a connection to the server and sends a GET request for the /users resource.',
+    highlight:['frontend','route'], packetFrom:'frontend', packetTo:'route', packetColor:'amber',
+    codeTag:'http request', code:`<span class="fn">GET</span> /users HTTP/1.1
+Host: api.example.com`,
+    log:`<span class="who">frontend</span> <span class="arrow">→</span> GET /users`
+  },
+  { phase:'Router matches the route', status:'STEP 2 OF 9',
+    title:'2 · The router matches GET /users to a rule',
+    body:'The backend keeps a list of routes — URL + method pairs, each pointing at a function. The router scans that list and finds the one that matches this exact request.',
+    highlight:['route'], packetAt:'route', packetColor:'amber',
+    codeTag:'route definition', code:`router.<span class="fn">get</span>(<span class="str">'/users'</span>, UserController.getUsers);`,
+    log:`<span class="who">router</span>    <span class="arrow">→</span> matched GET /users`
+  },
+  { phase:'Route hands off to the function', status:'STEP 3 OF 9',
+    title:'3 · The matching function is called',
+    body:'This function — often called a "controller" or "handler" — holds the actual logic for this one action. The router\'s job ends here; everything from now on is the function\'s responsibility.',
+    highlight:['route','function'], packetFrom:'route', packetTo:'function', packetColor:'amber',
+    codeTag:'handler invoked', code:`<span class="kw">async function</span> <span class="fn">getUsers</span>(req, res) { ... }`,
+    log:`<span class="who">router</span>    <span class="arrow">→</span> calling getUsers(req, res)`
+  },
+  { phase:'Function asks the database for data', status:'STEP 4 OF 9',
+    title:'4 · The function queries the database',
+    body:'Rather than writing SQL directly, the function calls an ORM method — a plain-code stand-in for a database query. User.findAll() reads as "give me every row in the users table."',
+    highlight:['function','database'], packetFrom:'function', packetTo:'database', packetColor:'cyan',
+    codeTag:'orm call', code:`<span class="kw">const</span> users = <span class="kw">await</span> User.<span class="fn">findAll</span>();`,
+    log:`<span class="who">handler</span>   <span class="arrow">→</span> User.findAll()`
+  },
+  { phase:'ORM translates that into SQL', status:'STEP 5 OF 9',
+    title:'5 · The ORM generates real SQL',
+    body:'Behind the scenes, the ORM converts that friendly method call into an actual SQL statement and sends it to the database engine to run.',
+    highlight:['database'], packetAt:'database', packetColor:'cyan',
+    codeTag:'generated sql', code:`<span class="kw">SELECT</span> id, name, email, role <span class="kw">FROM</span> users;`,
+    log:`<span class="who">database</span>  <span class="arrow">→</span> SELECT id, name, email, role FROM users;`
+  },
+  { phase:'Database returns matching rows', status:'STEP 6 OF 9',
+    title:'6 · The database returns rows',
+    body:'The database engine scans the users table and sends back every row that matched — as raw, structured data.',
+    highlight:['database','function'], packetFrom:'database', packetTo:'function', packetColor:'cyan',
+    special:'table',
+    log:`<span class="who">database</span>  <span class="arrow">→</span> 4 rows returned`
+  },
+  { phase:'Function builds the JSON response', status:'STEP 7 OF 9',
+    title:'7 · The function shapes a JSON response',
+    body:'The raw rows get passed into res.json(), which serializes them into JSON — a plain-text format that any frontend can parse — and prepares it to be sent back over HTTP.',
+    highlight:['function'], packetAt:'function', packetColor:'green',
+    codeTag:'json response', code:`{
+  <span class="str">"users"</span>: [
+    { <span class="str">"id"</span>: 1, <span class="str">"name"</span>: <span class="str">"Asha Patel"</span>, <span class="str">"role"</span>: <span class="str">"admin"</span> },
+    <span class="com">// ...3 more</span>
+  ]
+}`,
+    log:`<span class="who">handler</span>   <span class="arrow">→</span> res.json(users)`
+  },
+  { phase:'Response travels back to the frontend', status:'STEP 8 OF 9',
+    title:'8 · The response flows back the same path',
+    body:'The JSON response travels back through the router and over the network, the same route the request came in on, until it reaches the frontend code that originally called fetch().',
+    highlight:['function','frontend'], packetFrom:'function', packetTo:'frontend', packetColor:'green',
+    codeTag:'http response', code:`HTTP/1.1 200 OK
+Content-Type: application/json`,
+    log:`<span class="who">frontend</span> <span class="arrow">←</span> 200 OK (json)`
+  },
+  { phase:'Frontend renders the data', status:'STEP 9 OF 9',
+    title:'9 · The frontend turns data into UI',
+    body:'The frontend receives the parsed JSON and uses it to render an actual interface — looping over the array of users and displaying each one as a clean, styled element on the page.',
+    highlight:['frontend'], packetAt:'frontend', packetColor:'green',
+    special:'render',
+    log:`<span class="who">frontend</span> <span class="arrow">→</span> render complete ✓`
+  }
+];
+
+const mockUsers = [
+  {id:1,name:'Asha Patel',email:'asha@corp.dev',role:'admin'},
+  {id:2,name:'Leo Martins',email:'leo@corp.dev',role:'editor'},
+  {id:3,name:'Mina Cho',email:'mina@corp.dev',role:'viewer'},
+  {id:4,name:'Ravi Nair',email:'ravi@corp.dev',role:'editor'}
+];
+
+/* ---------------- state ---------------- */
+let current = 0;
+let playing = false;
+let playTimer = null;
+
+const boxIds = ['frontend','route','function','database'];
+
+function colorClass(c){ return c==='cyan' ? 'cy' : c==='green' ? 'gr' : ''; }
+
+function render(){
+  const s = steps[current];
+
+  document.getElementById('tutStatus').textContent = s.status + (current>0 ? ` of 9` : '');
+  document.getElementById('tutPhase').textContent = s.phase;
+
+  // box highlight
+  boxIds.forEach(id=>{
+    const el = document.getElementById('box-'+id);
+    el.classList.remove('lit','cy','gr');
+    if(s.highlight && s.highlight.includes(id)){
+      el.classList.add('lit');
+      const cc = colorClass(s.packetColor);
+      if(cc) el.classList.add(cc);
+    }
+  });
+
+  // packet position + color
+  const packet = document.getElementById('packet');
+  const target = s.packetTo || s.packetAt;
+  if(target && centers[target]){
+    packet.style.left = centers[target].x+'px';
+    packet.style.top = centers[target].y+'px';
+  }
+  const colorMap = {amber:'var(--amber)', cyan:'var(--cyan)', green:'var(--green)'};
+  const col = colorMap[s.packetColor] || colorMap.amber;
+  packet.style.background = col;
+  packet.style.boxShadow = '0 0 16px '+col;
+
+  // explain panel
+  const panel = document.getElementById('explainPanel');
+  let html = `<div class="step-tag">${s.status}</div><h3>${s.title}</h3><p>${s.body}</p>`;
+  if(s.code){
+    html += `<span class="codetag">${s.codeTag}</span><div class="codeblock">${s.code}</div>`;
+  }
+  if(s.special==='table'){
+    html += `<span class="codetag">rows returned</span>
+    <table class="mock-table"><tr><th>id</th><th>name</th><th>email</th><th>role</th></tr>
+    ${mockUsers.map(u=>`<tr><td>${u.id}</td><td>${u.name}</td><td>${u.email}</td><td>${u.role}</td></tr>`).join('')}
+    </table>`;
+  }
+  if(s.special==='render'){
+    html += `<span class="codetag">rendered in the browser</span>
+    <div class="render-preview">
+      <div class="rp-head">Users</div>
+      ${mockUsers.map(u=>`<div class="rp-row"><div class="rp-avatar"></div><div><div class="rp-name">${u.name}</div><div class="rp-role">${u.role}</div></div></div>`).join('')}
+    </div>`;
+  }
+  panel.innerHTML = html;
+
+  // trace log — rebuild from 1..current
+  const traceBody = document.getElementById('traceBody');
+  if(current===0){
+    traceBody.innerHTML = `<div class="trace-line placeholder">// waiting for request...</div>`;
+  } else {
+    traceBody.innerHTML = steps.slice(1, current+1).map((st,i)=>
+      `<div class="trace-line" style="animation-delay:${i*0.02}s">${st.log}</div>`
+    ).join('');
+    traceBody.scrollTop = traceBody.scrollHeight;
+  }
+
+  // dots
+  document.querySelectorAll('.pdot').forEach((d,i)=>{
+    const stepNum = i+1;
+    d.classList.toggle('now', stepNum===current);
+    d.classList.toggle('done', stepNum<current);
+  });
+
+  // buttons
+  document.getElementById('btnPrev').disabled = current===0;
+  document.getElementById('btnNext').disabled = current===9;
+  document.getElementById('btnPlay').textContent = playing ? '⏸' : '▶';
+  if(current===9){ stopPlay(); document.getElementById('btnPlay').disabled = true; }
+  else { document.getElementById('btnPlay').disabled = false; }
+}
+
+function goto(i){
+  current = Math.max(0, Math.min(9, i));
+  render();
+}
+function nextStep(){ if(current<9) goto(current+1); else stopPlay(); }
+function prevStep(){ if(current>0) goto(current-1); }
+function resetTutorial(){ stopPlay(); goto(0); }
+
+function togglePlay(){
+  if(playing){ stopPlay(); }
+  else {
+    playing = true;
+    render();
+    playTimer = setInterval(()=>{
+      if(current>=9){ stopPlay(); return; }
+      nextStep();
+    }, 2400);
+  }
+}
+function stopPlay(){
+  playing = false;
+  if(playTimer) clearInterval(playTimer);
+  playTimer = null;
+  document.getElementById('btnPlay').textContent = '▶';
+}
+
+// build dots
+const dotsWrap = document.getElementById('dots');
+for(let i=1;i<=9;i++){
+  const b = document.createElement('button');
+  b.className = 'pdot';
+  b.title = 'step '+i;
+  b.onclick = ()=>{ stopPlay(); goto(i); };
+  dotsWrap.appendChild(b);
+}
+
+render();
+</script>
+</body>
+</html>
